@@ -17,6 +17,8 @@ using Microsoft.Extensions.Hosting;
 
 namespace VibePad.Agent;
 
+internal sealed record LocalNetworkAddress(IPAddress Address, string InterfaceName, NetworkInterfaceType InterfaceType, bool HasDefaultGateway);
+
 internal static class Program
 {
     private const int Port = 8765;
@@ -45,12 +47,28 @@ internal static class Program
         Application.Run(new VibePadTrayContext(runtime, showWindowEvent));
     }
 
-    internal static IEnumerable<IPAddress> LocalIpv4Addresses() =>
+    internal static IEnumerable<LocalNetworkAddress> LocalIpv4Addresses() =>
         NetworkInterface.GetAllNetworkInterfaces()
-            .Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-            .SelectMany(n => n.GetIPProperties().UnicastAddresses)
-            .Select(a => a.Address)
-            .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a));
+            .Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211)
+            .SelectMany(n =>
+            {
+                var properties = n.GetIPProperties();
+                var hasDefaultGateway = properties.GatewayAddresses.Any(g => g.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.Any.Equals(g.Address));
+                return properties.UnicastAddresses
+                    .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork && IsPrivateLanAddress(a.Address))
+                    .Select(a => new LocalNetworkAddress(a.Address, n.Name, n.NetworkInterfaceType, hasDefaultGateway));
+            })
+            .OrderByDescending(a => a.HasDefaultGateway)
+            .ThenBy(a => a.InterfaceType == NetworkInterfaceType.Ethernet ? 0 : 1)
+            .ThenBy(a => a.InterfaceName);
+
+    private static bool IsPrivateLanAddress(IPAddress address)
+    {
+        var bytes = address.GetAddressBytes();
+        return bytes[0] == 10
+            || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31)
+            || (bytes[0] == 192 && bytes[1] == 168);
+    }
 }
 
 internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInjector input, MouseMotionBuffer mouseMotion, UdpMouseReceiver udpMouse, Action<string> reportStatus)

@@ -7,5 +7,7 @@ local.properties
 bin/
 obj/
 release/
+installer/payload/
+installer/output/
 android/.tools/
 .vs/
