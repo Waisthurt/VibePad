@@ -301,19 +301,21 @@ internal sealed class StatusForm : Form
         WireHoverEvent(_ipCard, _ipCard, Surface, cardHoverBg);
         WireClickEvent(_ipCard, copyHandler);
 
-        // 4. Bottom Panel (using TableLayoutPanel with AutoSize)
+        // 4. Bottom Panel
         var bottomTable = new TableLayoutPanel
         {
             Margin = new Padding(0),
             Dock = DockStyle.Fill,
-            RowCount = 1,
+            RowCount = 2,
             ColumnCount = 2,
             AutoSize = true
         };
         bottomTable.ColumnStyles.Clear();
         bottomTable.RowStyles.Clear();
-        bottomTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65F));
-        bottomTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35F));
+        bottomTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        bottomTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bottomTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        bottomTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var startup = new CheckBox
         {
@@ -329,24 +331,12 @@ internal sealed class StatusForm : Form
 
         var hint = new Label
         {
-            Text = "关闭窗口后，VibePad 会继续在系统托盘运行。",
+            Text = "关闭窗口后，VibePad 会继续在系统托盘运行",
             AutoSize = true,
             ForeColor = Muted,
             Font = new Font("Segoe UI", 8.5f),
             Margin = new Padding(2, 0, 0, 0)
         };
-
-        var leftFlow = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            Padding = new Padding(0),
-            Margin = new Padding(0),
-            AutoSize = true
-        };
-        leftFlow.Controls.Add(startup);
-        leftFlow.Controls.Add(hint);
 
         var quit = new Button
         {
@@ -367,8 +357,10 @@ internal sealed class StatusForm : Form
         quit.FlatAppearance.MouseDownBackColor = Color.FromArgb(81, 73, 93);
         quit.Click += (_, _) => exit();
 
-        bottomTable.Controls.Add(leftFlow, 0, 0);
+        bottomTable.Controls.Add(startup, 0, 0);
         bottomTable.Controls.Add(quit, 1, 0);
+        bottomTable.Controls.Add(hint, 0, 1);
+        bottomTable.SetColumnSpan(hint, 2);
 
         // 5. Main Grid TableLayout
         var mainTable = new TableLayoutPanel
@@ -471,7 +463,7 @@ internal sealed class StatusForm : Form
             _connectionCard.BackColor = Color.FromArgb(24, 48, 38);
             _status.ForeColor = Color.FromArgb(130, 210, 160);
             _status.Text = "● 手机已成功连接";
-            _statusDetail.Text = $"已连接手机：\n{phoneIp}\n可以开始在手机端输入。";
+            _statusDetail.Text = $"已连接手机：\n{phoneIp}\n可以开始在手机端输入";
             return;
         }
 
@@ -487,7 +479,7 @@ internal sealed class StatusForm : Form
         _connectionCard.BackColor = Surface;
         _status.ForeColor = Primary;
         _status.Text = "● 等待手机连接";
-        _statusDetail.Text = "打开手机端 VibePad，填入下方 IP 地址并点击连接以开始输入。";
+        _statusDetail.Text = "打开手机端 VibePad，填入下方 IP 地址并点击连接以开始输入";
     }
 
     [DllImport("dwmapi.dll")]
