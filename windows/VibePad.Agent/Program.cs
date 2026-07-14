@@ -100,7 +100,7 @@ internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInje
             socket = await context.WebSockets.AcceptWebSocketAsync();
             udpMouse.AllowFrom(context.Connection.RemoteIpAddress);
             reportStatus($"已连接：{context.Connection.RemoteIpAddress}");
-            await SendAsync(socket, new { type = "udp_ready", port = udpMouse.Port }, context.RequestAborted);
+            await SendAsync(socket, new { type = "udp_ready", port = udpMouse.Port, scroll = true }, context.RequestAborted);
             await ReceiveLoopAsync(socket, context.RequestAborted, context.Connection.RemoteIpAddress);
         }
         catch (Exception e) when (e is not WebSocketException && e is not OperationCanceledException)
@@ -166,7 +166,8 @@ internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInje
                     HandleClipboard(root);
                     break;
                 case "mouse_scroll":
-                    input.Scroll(Math.Clamp(root.GetProperty("delta").GetInt32(), -1200, 1200));
+                    if (!udpMouse.IsScrollActiveFor(remoteAddress))
+                        mouseMotion.AddScroll(Math.Clamp(root.GetProperty("delta").GetInt32(), -1200, 1200));
                     break;
                 case "mouse_button":
                     HandleMouseButton(root);
@@ -371,7 +372,8 @@ internal sealed class UdpMouseReceiver : IDisposable
     private readonly object _addressGate = new();
     private readonly Task _receiveTask;
     private IPAddress? _allowedAddress;
-    private bool _active;
+    private bool _mouseActive;
+    private bool _scrollActive;
 
     public int Port { get; }
 
@@ -388,13 +390,19 @@ internal sealed class UdpMouseReceiver : IDisposable
         lock (_addressGate)
         {
             _allowedAddress = Normalize(address);
-            _active = false;
+            _mouseActive = false;
+            _scrollActive = false;
         }
     }
 
     public bool IsActiveFor(IPAddress? address)
     {
-        lock (_addressGate) return _active && _allowedAddress?.Equals(Normalize(address)) == true;
+        lock (_addressGate) return _mouseActive && _allowedAddress?.Equals(Normalize(address)) == true;
+    }
+
+    public bool IsScrollActiveFor(IPAddress? address)
+    {
+        lock (_addressGate) return _scrollActive && _allowedAddress?.Equals(Normalize(address)) == true;
     }
 
     public void ClearAllowedAddress()
@@ -402,7 +410,8 @@ internal sealed class UdpMouseReceiver : IDisposable
         lock (_addressGate)
         {
             _allowedAddress = null;
-            _active = false;
+            _mouseActive = false;
+            _scrollActive = false;
         }
     }
 
@@ -414,14 +423,22 @@ internal sealed class UdpMouseReceiver : IDisposable
             {
                 var datagram = await _socket.ReceiveAsync(_cancellation.Token);
                 lock (_addressGate)
-                {
                     if (_allowedAddress is null || !_allowedAddress.Equals(Normalize(datagram.RemoteEndPoint.Address))) continue;
-                    _active = true;
+
+                if (datagram.Buffer.Length == 8)
+                {
+                    var dx = BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(datagram.Buffer.AsSpan(0, 4)));
+                    var dy = BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(datagram.Buffer.AsSpan(4, 4)));
+                    if (!float.IsFinite(dx) || !float.IsFinite(dy)) continue;
+                    lock (_addressGate) _mouseActive = true;
+                    _mouseMotion.Add(Math.Clamp(dx, -500f, 500f), Math.Clamp(dy, -500f, 500f));
                 }
-                if (datagram.Buffer.Length != 8) continue;
-                var dx = BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(datagram.Buffer.AsSpan(0, 4)));
-                var dy = BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(datagram.Buffer.AsSpan(4, 4)));
-                if (float.IsFinite(dx) && float.IsFinite(dy)) _mouseMotion.Add(Math.Clamp(dx, -500f, 500f), Math.Clamp(dy, -500f, 500f));
+                else if (datagram.Buffer.Length == 5 && datagram.Buffer[0] == 1)
+                {
+                    var delta = BinaryPrimitives.ReadInt32LittleEndian(datagram.Buffer.AsSpan(1, 4));
+                    lock (_addressGate) _scrollActive = true;
+                    _mouseMotion.AddScroll(Math.Clamp(delta, -1200, 1200));
+                }
             }
         }
         catch (OperationCanceledException) { }
@@ -446,6 +463,7 @@ internal sealed class MouseMotionBuffer : IDisposable
     private readonly Task _flushTask;
     private double _pendingX;
     private double _pendingY;
+    private int _pendingScroll;
 
     public MouseMotionBuffer(InputInjector input)
     {
@@ -461,12 +479,18 @@ internal sealed class MouseMotionBuffer : IDisposable
         }
     }
 
+    public void AddScroll(int delta)
+    {
+        lock (_gate) _pendingScroll = Math.Clamp(_pendingScroll + delta, -1200, 1200);
+    }
+
     public void Clear()
     {
         lock (_gate)
         {
             _pendingX = 0;
             _pendingY = 0;
+            _pendingScroll = 0;
         }
     }
 
@@ -479,14 +503,18 @@ internal sealed class MouseMotionBuffer : IDisposable
             {
                 int dx;
                 int dy;
+                int scroll;
                 lock (_gate)
                 {
                     dx = (int)Math.Truncate(_pendingX);
                     dy = (int)Math.Truncate(_pendingY);
                     _pendingX -= dx;
                     _pendingY -= dy;
+                    scroll = _pendingScroll;
+                    _pendingScroll = 0;
                 }
-                injector.MoveMouse(dx, dy);
+                if (dx != 0 || dy != 0) injector.MoveMouse(dx, dy);
+                if (scroll != 0) injector.Scroll(scroll);
             }
         }
         catch (OperationCanceledException) { }

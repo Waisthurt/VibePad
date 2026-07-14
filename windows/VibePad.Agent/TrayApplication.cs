@@ -191,7 +191,7 @@ internal sealed class StatusForm : Form
         this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
 
         var title = new Label { Text = "VibePad", AutoSize = true, ForeColor = Primary, Font = new Font("Segoe UI", 22, FontStyle.Bold), Margin = new Padding(0) };
-        var subtitle = new Label { Text = "让手机成为电脑的输入助手", AutoSize = true, ForeColor = Muted, Font = new Font("Segoe UI", 9.5f), Margin = new Padding(2, 2, 0, 0) };
+        var subtitle = new Label { Text = "让手机成为你的 Vibe Coding 工具", AutoSize = true, ForeColor = Muted, Font = new Font("Segoe UI", 9.5f), Margin = new Padding(2, 2, 0, 0) };
 
         // 1. Connection Card
         _connectionCard.BackColor = Surface;
