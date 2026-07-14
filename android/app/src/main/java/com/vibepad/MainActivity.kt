@@ -16,6 +16,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -44,6 +45,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -52,6 +54,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -121,9 +124,12 @@ private fun VibePadScreen(connection: VibeSocket) {
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Text("VibePad", style = MaterialTheme.typography.headlineSmall)
+            Text("VibePad", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.primary)
             IconButton(onClick = { showSettings = true }) {
                 Icon(Icons.Outlined.Settings, contentDescription = "控制设置", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = { connection.key("SCREENSHOT", "press"); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }) {
+                Text("截图", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             }
             Box(modifier = Modifier.weight(1f))
             Text(
@@ -157,8 +163,10 @@ private fun VibePadScreen(connection: VibeSocket) {
             maxLines = 5
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            ActionButton("复制", Modifier.weight(1f)) { connection.clipboard("copy"); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
+            ActionButton("粘贴", Modifier.weight(1f)) { connection.clipboard("paste"); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
             ActionButton("上传", Modifier.weight(1f)) { connection.paste(text); if (connection.state == ConnectionState.CONNECTED) text = "" }
-            ActionButton("Enter", Modifier.weight(1f)) { connection.key("ENTER", "press"); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
+            ActionButton("回车", Modifier.weight(1f)) { connection.key("ENTER", "press"); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
             HoldBackspace(connection, Modifier.weight(1f))
         }
         Touchpad(connection, Modifier.fillMaxWidth().weight(1f))
@@ -189,10 +197,18 @@ private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
 
 @Composable
 private fun ActionButton(label: String, modifier: Modifier, onClick: () -> Unit) {
-    Button(onClick = onClick, modifier = modifier.height(52.dp), colors = ButtonDefaults.buttonColors()) { Text(label) }
+    Button(
+        onClick = onClick,
+        modifier = modifier.height(52.dp),
+        colors = ButtonDefaults.buttonColors(),
+        contentPadding = PaddingValues(horizontal = 4.dp)
+    ) {
+        Text(label, maxLines = 1, softWrap = false, fontSize = 16.sp, textAlign = TextAlign.Center)
+    }
 }
 
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 private fun Touchpad(connection: VibeSocket, modifier: Modifier) {
     val view = LocalView.current
     Box(
@@ -234,13 +250,18 @@ private fun Touchpad(connection: VibeSocket, modifier: Modifier) {
                                 }
                                 lastTwoFingerY = averageY
                             } else if (pressed.size == 1 && !multiTouch) {
-                                val position = pressed.first().position
-                                val dx = position.x - lastPosition.x
-                                val dy = position.y - lastPosition.y
-                                if (abs(dx) >= 0.5f || abs(dy) >= 0.5f) {
-                                    moved = true
-                                    connection.moveMouse(dx, dy)
-                                    lastPosition = position
+                                // Compose may coalesce several hardware touch samples into one
+                                // event. Replay its historical positions so the cursor follows the
+                                // phone's actual sampling cadence instead of only UI frame cadence.
+                                val change = pressed.first()
+                                for (position in change.historical.map { it.position } + change.position) {
+                                    val dx = position.x - lastPosition.x
+                                    val dy = position.y - lastPosition.y
+                                    if (abs(dx) >= 0.05f || abs(dy) >= 0.05f) {
+                                        moved = true
+                                        connection.moveMouse(dx, dy)
+                                        lastPosition = position
+                                    }
                                 }
                             }
                             anyPressed = event.changes.any { it.pressed }

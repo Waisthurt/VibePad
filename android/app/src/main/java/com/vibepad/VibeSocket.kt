@@ -13,6 +13,11 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -23,12 +28,15 @@ class VibeSocket(context: Context) {
     private val preferences = context.getSharedPreferences("vibepad", Context.MODE_PRIVATE)
     private val main = Handler(Looper.getMainLooper())
     private val client = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
+    private val udpSocket = DatagramSocket()
     private val movementLock = Any()
     private val movementScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "VibePad mouse motion").apply { isDaemon = true }
     }
     private var socket: WebSocket? = null
     @Volatile private var connected = false
+    @Volatile private var udpReady = false
+    @Volatile private var udpDestination: InetAddress? = null
     private var pendingDx = 0f
     private var pendingDy = 0f
 
@@ -52,6 +60,8 @@ class VibeSocket(context: Context) {
         if (normalized.isBlank()) { showFailure("请输入电脑 IP 地址"); return }
         disconnect()
         clearMouseMovement()
+        udpReady = false
+        udpDestination = runCatching { InetAddress.getByName(normalized) }.getOrNull()
         savedHost = normalized
         preferences.edit().putString("host", normalized).apply()
         update(ConnectionState.CONNECTING, "正在连接 $normalized")
@@ -65,10 +75,12 @@ class VibeSocket(context: Context) {
                 override fun onMessage(webSocket: WebSocket, text: String) = handleMessage(text)
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     connected = false
+                    udpReady = false
                     showFailure("连接失败：${t.message ?: "请检查 IP 和防火墙"}")
                 }
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     connected = false
+                    udpReady = false
                     update(ConnectionState.DISCONNECTED, "连接已断开")
                 }
             }
@@ -77,6 +89,7 @@ class VibeSocket(context: Context) {
 
     fun disconnect() {
         connected = false
+        udpReady = false
         socket?.close(1000, "user disconnected")
         socket = null
         if (state != ConnectionState.DISCONNECTED) update(ConnectionState.DISCONNECTED, "未连接")
@@ -107,9 +120,12 @@ class VibeSocket(context: Context) {
 
     fun scroll(delta: Int) = send(JSONObject().put("type", "mouse_scroll").put("delta", delta))
 
+    fun clipboard(action: String) = send(JSONObject().put("type", "clipboard").put("action", action))
+
     fun dispose() {
         disconnect()
         movementScheduler.shutdownNow()
+        udpSocket.close()
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()
     }
@@ -127,6 +143,18 @@ class VibeSocket(context: Context) {
             result
         }
         if (movement.first == 0f && movement.second == 0f) return
+        if (udpReady) {
+            udpDestination?.let { destination ->
+                val packetBytes = ByteBuffer.allocate(8)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .putFloat(movement.first)
+                    .putFloat(movement.second)
+                    .array()
+                runCatching { udpSocket.send(DatagramPacket(packetBytes, packetBytes.size, destination, 8767)) }
+            }
+        }
+        // This is a safety fallback. A new Windows Agent ignores it after receiving its
+        // first UDP packet; an older or firewall-blocked Agent still receives movement.
         val payload = JSONObject()
             .put("type", "mouse_move")
             .put("dx", movement.first)
@@ -143,6 +171,7 @@ class VibeSocket(context: Context) {
         val json = runCatching { JSONObject(text) }.getOrNull() ?: return
         when (json.optString("type")) {
             "paste_result" -> update(ConnectionState.CONNECTED, if (json.optBoolean("success")) "已粘贴到电脑" else "粘贴失败")
+            "udp_ready" -> udpReady = true
             "error" -> update(ConnectionState.CONNECTED, "错误：${json.optString("message")}")
         }
     }

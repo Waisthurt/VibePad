@@ -20,7 +20,7 @@ The Agent writes `text` to the Windows clipboard and injects Ctrl+V into the cur
 {"type":"key","key":"BACKSPACE","action":"up"}
 ```
 
-Permitted keys in v0: `ENTER`, `BACKSPACE`. `press` means an atomic key down/up pair.
+Permitted keys in v0: `ENTER`, `BACKSPACE`, `SCREENSHOT`. `press` means an atomic key down/up pair. `SCREENSHOT` invokes the standard Windows screen-snipping shortcut (`Win`+`Shift`+`S`), so it does not depend on a laptop's manufacturer-specific function-key mapping.
 
 ### Mouse controls
 
@@ -33,6 +33,21 @@ Permitted keys in v0: `ENTER`, `BACKSPACE`. `press` means an atomic key down/up 
 ```
 
 `mouse_move` is relative movement. Permitted buttons are `left` and `right`; permitted actions are `down`, `up`, and `press`. A positive wheel `delta` scrolls up.
+
+### Clipboard shortcuts
+
+```json
+{"type":"clipboard","action":"copy"}
+{"type":"clipboard","action":"paste"}
+```
+
+These commands inject Ctrl+C and Ctrl+V respectively into the currently focused Windows application.
+
+## High-frequency mouse movement
+
+After the WebSocket connection is accepted, the Agent returns `{"type":"udp_ready","port":8767}`. Android then sends each accumulated movement as an 8-byte little-endian UDP datagram to port `8767`: `float32 dx`, followed by `float32 dy`.
+
+The Agent accepts UDP only from the connected phone's IP address. Android keeps emitting the WebSocket `mouse_move` fallback: the Agent ignores that fallback after its first valid UDP datagram, but continues to use it if UDP is blocked by a firewall.
 
 ### Keepalive
 

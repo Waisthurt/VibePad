@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -19,6 +20,7 @@ namespace VibePad.Agent;
 internal static class Program
 {
     private const int Port = 8765;
+    private const int MouseUdpPort = 8767;
     private const string InstanceMutexName = "VibePad.Agent.SingleInstance";
     internal const string ShowWindowEventName = "VibePad.Agent.ShowWindow";
 
@@ -39,7 +41,7 @@ internal static class Program
 
         using var showWindowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowWindowEventName);
         ApplicationConfiguration.Initialize();
-        using var runtime = new AgentRuntime(Port);
+        using var runtime = new AgentRuntime(Port, MouseUdpPort);
         Application.Run(new VibePadTrayContext(runtime, showWindowEvent));
     }
 
@@ -51,7 +53,7 @@ internal static class Program
             .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a));
 }
 
-internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInjector input, MouseMotionBuffer mouseMotion, Action<string> reportStatus)
+internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInjector input, MouseMotionBuffer mouseMotion, UdpMouseReceiver udpMouse, Action<string> reportStatus)
 {
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -78,8 +80,10 @@ internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInje
         try
         {
             socket = await context.WebSockets.AcceptWebSocketAsync();
+            udpMouse.AllowFrom(context.Connection.RemoteIpAddress);
             reportStatus($"已连接：{context.Connection.RemoteIpAddress}");
-            await ReceiveLoopAsync(socket, context.RequestAborted);
+            await SendAsync(socket, new { type = "udp_ready", port = udpMouse.Port }, context.RequestAborted);
+            await ReceiveLoopAsync(socket, context.RequestAborted, context.Connection.RemoteIpAddress);
         }
         catch (Exception e) when (e is not WebSocketException && e is not OperationCanceledException)
         {
@@ -88,13 +92,14 @@ internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInje
         finally
         {
             mouseMotion.Clear();
+            udpMouse.ClearAllowedAddress();
             input.ReleaseAll();
             if (socket is not null) socket.Dispose();
             reportStatus("等待手机连接");
         }
     }
 
-    private async Task ReceiveLoopAsync(WebSocket socket, CancellationToken token)
+    private async Task ReceiveLoopAsync(WebSocket socket, CancellationToken token, IPAddress? remoteAddress)
     {
         var buffer = new byte[64 * 1024];
         while (socket.State == WebSocketState.Open && !token.IsCancellationRequested)
@@ -110,11 +115,11 @@ internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInje
             } while (!result.EndOfMessage);
 
             if (result.MessageType != WebSocketMessageType.Text) continue;
-            await DispatchAsync(socket, Encoding.UTF8.GetString(content.ToArray()), token);
+            await DispatchAsync(socket, Encoding.UTF8.GetString(content.ToArray()), token, remoteAddress);
         }
     }
 
-    private async Task DispatchAsync(WebSocket socket, string json, CancellationToken token)
+    private async Task DispatchAsync(WebSocket socket, string json, CancellationToken token, IPAddress? remoteAddress)
     {
         try
         {
@@ -136,7 +141,11 @@ internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInje
                     await SendAsync(socket, new { type = "paste_result", requestId = id, success = true, message = "pasted" }, token);
                     break;
                 case "mouse_move":
-                    mouseMotion.Add(ClampMovement(root.GetProperty("dx").GetDouble()), ClampMovement(root.GetProperty("dy").GetDouble()));
+                    if (!udpMouse.IsActiveFor(remoteAddress))
+                        mouseMotion.Add(ClampMovement(root.GetProperty("dx").GetDouble()), ClampMovement(root.GetProperty("dy").GetDouble()));
+                    break;
+                case "clipboard":
+                    HandleClipboard(root);
                     break;
                 case "mouse_scroll":
                     input.Scroll(Math.Clamp(root.GetProperty("delta").GetInt32(), -1200, 1200));
@@ -159,7 +168,18 @@ internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInje
     {
         var key = message.GetProperty("key").GetString();
         var action = message.GetProperty("action").GetString();
-        var virtualKey = key switch { "ENTER" => 0x0D, "BACKSPACE" => 0x08, _ => throw new InvalidOperationException("Unsupported key.") };
+        if (key == "SCREENSHOT")
+        {
+            if (action != "press") throw new InvalidOperationException("Screenshot only supports press.");
+            input.OpenScreenSnip();
+            return;
+        }
+        var virtualKey = key switch
+        {
+            "ENTER" => 0x0D,
+            "BACKSPACE" => 0x08,
+            _ => throw new InvalidOperationException("Unsupported key.")
+        };
         switch (action)
         {
             case "down": input.KeyDown(virtualKey); break;
@@ -178,10 +198,20 @@ internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInje
         input.MouseButton(button, action);
     }
 
-    private static int ClampMovement(double value)
+    private void HandleClipboard(JsonElement message)
+    {
+        switch (message.GetProperty("action").GetString())
+        {
+            case "copy": input.TapCtrlC(); break;
+            case "paste": input.TapCtrlV(); break;
+            default: throw new InvalidOperationException("Unsupported clipboard action.");
+        }
+    }
+
+    private static double ClampMovement(double value)
     {
         if (!double.IsFinite(value)) throw new InvalidOperationException("Invalid mouse movement.");
-        return (int)Math.Clamp(Math.Round(value), -500d, 500d);
+        return Math.Clamp(value, -500d, 500d);
     }
 
     private static Task SendAsync(WebSocket socket, object payload, CancellationToken token) =>
@@ -228,7 +258,22 @@ internal sealed class InputInjector
 
     public void KeyDown(int key) { lock (_gate) if (_heldKeys.Add(key)) Send(key, false); }
     public void KeyUp(int key) { lock (_gate) if (_heldKeys.Remove(key)) Send(key, true); }
+    public void TapCtrlC() { KeyDown(0x11); KeyDown(0x43); KeyUp(0x43); KeyUp(0x11); }
     public void TapCtrlV() { KeyDown(0x11); KeyDown(0x56); KeyUp(0x56); KeyUp(0x11); }
+    public void OpenScreenSnip()
+    {
+        lock (_gate)
+        {
+            // This is the Windows-wide screen-snipping shortcut (Win+Shift+S), rather
+            // than the laptop-specific F10 function-key mapping.
+            Send(0x5B, false, extended: true);
+            Send(0x10, false);
+            Send(0x53, false);
+            Send(0x53, true);
+            Send(0x10, true);
+            Send(0x5B, true, extended: true);
+        }
+    }
     public void MoveMouse(int dx, int dy)
     {
         if (dx == 0 && dy == 0) return;
@@ -269,9 +314,10 @@ internal sealed class InputInjector
         if (_heldMouseButtons.Remove(button)) SendMouse(0, 0, button == "left" ? 0x0004u : 0x0010u, 0);
     }
 
-    private static void Send(int virtualKey, bool keyUp)
+    private static void Send(int virtualKey, bool keyUp, bool extended = false)
     {
-        var input = new INPUT { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wVk = (ushort)virtualKey, dwFlags = keyUp ? 0x0002u : 0u } } };
+        var flags = (keyUp ? 0x0002u : 0u) | (extended ? 0x0001u : 0u);
+        var input = new INPUT { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wVk = (ushort)virtualKey, dwFlags = flags } } };
         if (SendInput(1, [input], Marshal.SizeOf<INPUT>()) != 1) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
     }
 
@@ -299,6 +345,82 @@ internal sealed class InputInjector
     [StructLayout(LayoutKind.Sequential)] private struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public nint dwExtraInfo; }
 }
 
+internal sealed class UdpMouseReceiver : IDisposable
+{
+    private readonly UdpClient _socket;
+    private readonly MouseMotionBuffer _mouseMotion;
+    private readonly CancellationTokenSource _cancellation = new();
+    private readonly object _addressGate = new();
+    private readonly Task _receiveTask;
+    private IPAddress? _allowedAddress;
+    private bool _active;
+
+    public int Port { get; }
+
+    public UdpMouseReceiver(int port, MouseMotionBuffer mouseMotion)
+    {
+        Port = port;
+        _mouseMotion = mouseMotion;
+        _socket = new UdpClient(new IPEndPoint(IPAddress.Any, port));
+        _receiveTask = Task.Run(ReceiveLoopAsync);
+    }
+
+    public void AllowFrom(IPAddress? address)
+    {
+        lock (_addressGate)
+        {
+            _allowedAddress = Normalize(address);
+            _active = false;
+        }
+    }
+
+    public bool IsActiveFor(IPAddress? address)
+    {
+        lock (_addressGate) return _active && _allowedAddress?.Equals(Normalize(address)) == true;
+    }
+
+    public void ClearAllowedAddress()
+    {
+        lock (_addressGate)
+        {
+            _allowedAddress = null;
+            _active = false;
+        }
+    }
+
+    private async Task ReceiveLoopAsync()
+    {
+        try
+        {
+            while (!_cancellation.IsCancellationRequested)
+            {
+                var datagram = await _socket.ReceiveAsync(_cancellation.Token);
+                lock (_addressGate)
+                {
+                    if (_allowedAddress is null || !_allowedAddress.Equals(Normalize(datagram.RemoteEndPoint.Address))) continue;
+                    _active = true;
+                }
+                if (datagram.Buffer.Length != 8) continue;
+                var dx = BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(datagram.Buffer.AsSpan(0, 4)));
+                var dy = BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(datagram.Buffer.AsSpan(4, 4)));
+                if (float.IsFinite(dx) && float.IsFinite(dy)) _mouseMotion.Add(Math.Clamp(dx, -500f, 500f), Math.Clamp(dy, -500f, 500f));
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+    }
+
+    private static IPAddress? Normalize(IPAddress? address) => address?.IsIPv4MappedToIPv6 == true ? address.MapToIPv4() : address;
+
+    public void Dispose()
+    {
+        _cancellation.Cancel();
+        _socket.Dispose();
+        try { _receiveTask.Wait(TimeSpan.FromSeconds(1)); } catch (AggregateException) { }
+        _cancellation.Dispose();
+    }
+}
+
 internal sealed class MouseMotionBuffer : IDisposable
 {
     private readonly object _gate = new();
@@ -312,7 +434,7 @@ internal sealed class MouseMotionBuffer : IDisposable
         _flushTask = Task.Run(() => FlushLoopAsync(input));
     }
 
-    public void Add(int dx, int dy)
+    public void Add(double dx, double dy)
     {
         lock (_gate)
         {

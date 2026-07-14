@@ -9,17 +9,19 @@ internal sealed class AgentRuntime : IDisposable
     private readonly ClipboardWorker _clipboard = new();
     private readonly InputInjector _input = new();
     private readonly MouseMotionBuffer _mouseMotion;
+    private readonly UdpMouseReceiver _udpMouse;
     private readonly AgentServer _server;
     private Task? _runTask;
 
     public event Action<string>? StatusChanged;
     public IReadOnlyList<IPAddress> Addresses { get; }
 
-    public AgentRuntime(int port)
+    public AgentRuntime(int port, int mouseUdpPort)
     {
         Addresses = Program.LocalIpv4Addresses().ToArray();
         _mouseMotion = new MouseMotionBuffer(_input);
-        _server = new AgentServer(port, _clipboard, _input, _mouseMotion, ReportStatus);
+        _udpMouse = new UdpMouseReceiver(mouseUdpPort, _mouseMotion);
+        _server = new AgentServer(port, _clipboard, _input, _mouseMotion, _udpMouse, ReportStatus);
     }
 
     public void Start()
@@ -41,6 +43,7 @@ internal sealed class AgentRuntime : IDisposable
         _cancellation.Cancel();
         try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { }
         _input.ReleaseAll();
+        _udpMouse.Dispose();
         _mouseMotion.Dispose();
         _clipboard.Dispose();
         _cancellation.Dispose();
