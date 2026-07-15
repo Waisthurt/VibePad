@@ -20,6 +20,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, FAILED }
@@ -33,11 +34,20 @@ class VibeSocket(context: Context) {
     private val movementScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "VibePad mouse motion").apply { isDaemon = true }
     }
+    private val reconnectScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "VibePad reconnect").apply { isDaemon = true }
+    }
     private var socket: WebSocket? = null
+    private var reconnectTask: ScheduledFuture<*>? = null
     @Volatile private var connected = false
     @Volatile private var udpReady = false
     @Volatile private var udpScrollReady = false
     @Volatile private var udpDestination: InetAddress? = null
+    @Volatile private var appInForeground = true
+    @Volatile private var userDisconnected = false
+    @Volatile private var connectionGeneration = 0
+    private var reconnectTarget: String? = preferences.getString("last_successful_host", null)
+    private var reconnectAttempt = 0
     private var pendingDx = 0f
     private var pendingDy = 0f
     private var pendingScroll = 0f
@@ -52,6 +62,8 @@ class VibeSocket(context: Context) {
         private set
     var scrollSensitivity by mutableFloatStateOf(preferences.getFloat("scroll_sensitivity", 1f))
         private set
+    var autoReconnectEnabled by mutableStateOf(preferences.getBoolean("auto_reconnect", true))
+        private set
 
     init {
         // Mouse events can arrive in bursts. Flush the combined relative movement at a
@@ -62,39 +74,82 @@ class VibeSocket(context: Context) {
     fun connect(host: String) {
         val normalized = host.trim().removePrefix("ws://").removePrefix("http://").substringBefore('/')
         if (normalized.isBlank()) { showFailure("请输入电脑 IP 地址"); return }
-        disconnect()
-        clearPendingInput()
-        udpReady = false
-        udpScrollReady = false
-        udpDestination = runCatching { InetAddress.getByName(normalized) }.getOrNull()
         savedHost = normalized
         preferences.edit().putString("host", normalized).apply()
-        update(ConnectionState.CONNECTING, "正在连接 $normalized")
+        reconnectTarget = normalized
+        reconnectAttempt = 0
+        userDisconnected = false
+        cancelReconnect()
+        startConnection(normalized, automatic = false)
+    }
+
+    fun onAppForeground() {
+        appInForeground = true
+        if (autoReconnectEnabled && !userDisconnected && !connected) {
+            val target = reconnectTarget ?: return
+            reconnectAttempt = 0
+            cancelReconnect()
+            startConnection(target, automatic = true)
+        }
+    }
+
+    fun onAppBackground() {
+        appInForeground = false
+        cancelReconnect()
+    }
+
+    fun updateAutoReconnect(enabled: Boolean) {
+        autoReconnectEnabled = enabled
+        preferences.edit().putBoolean("auto_reconnect", enabled).apply()
+        if (!enabled) cancelReconnect() else onAppForeground()
+    }
+
+    private fun startConnection(host: String, automatic: Boolean) {
+        val generation = ++connectionGeneration
+        socket?.cancel()
+        clearPendingInput()
+        connected = false
+        udpReady = false
+        udpScrollReady = false
+        udpDestination = runCatching { InetAddress.getByName(host) }.getOrNull()
+        update(ConnectionState.CONNECTING, if (automatic) "正在自动重连 $host" else "正在连接 $host")
         socket = client.newWebSocket(
-            Request.Builder().url("ws://$normalized:8765/vibepad/").build(),
+            Request.Builder().url("ws://$host:8765/vibepad/").build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    if (generation != connectionGeneration) return
                     connected = true
-                    update(ConnectionState.CONNECTED, "已连接：$normalized")
+                    reconnectAttempt = 0
+                    reconnectTarget = host
+                    preferences.edit().putString("last_successful_host", host).apply()
+                    update(ConnectionState.CONNECTED, "已连接：$host")
                 }
-                override fun onMessage(webSocket: WebSocket, text: String) = handleMessage(text)
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (generation == connectionGeneration) handleMessage(text)
+                }
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (generation != connectionGeneration) return
                     connected = false
                     udpReady = false
                     udpScrollReady = false
-                    showFailure("连接失败：${t.message ?: "请检查 IP 和防火墙"}")
+                    scheduleReconnect(host, t.message ?: "请检查 IP 和防火墙")
                 }
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    if (generation != connectionGeneration) return
                     connected = false
                     udpReady = false
                     udpScrollReady = false
-                    update(ConnectionState.DISCONNECTED, "连接已断开")
+                    scheduleReconnect(host, "连接已断开")
                 }
             }
         )
     }
 
     fun disconnect() {
+        userDisconnected = true
+        reconnectTarget = null
+        cancelReconnect()
+        connectionGeneration++
         connected = false
         udpReady = false
         udpScrollReady = false
@@ -128,6 +183,36 @@ class VibeSocket(context: Context) {
         preferences.edit().putFloat("scroll_sensitivity", scrollSensitivity).apply()
     }
 
+    private fun scheduleReconnect(host: String, reason: String) {
+        if (!autoReconnectEnabled || !appInForeground || userDisconnected) {
+            update(ConnectionState.DISCONNECTED, reason)
+            return
+        }
+        if (reconnectTask?.isDone == false) return
+        val delays = longArrayOf(1_000, 2_000, 5_000, 10_000)
+        if (reconnectAttempt >= delays.size) {
+            update(ConnectionState.DISCONNECTED, "未连接，点击连接重试")
+            return
+        }
+        val attempt = reconnectAttempt++
+        update(ConnectionState.CONNECTING, "正在自动重连 $host（${attempt + 1}/${delays.size}）")
+        cancelReconnect()
+        reconnectTask = reconnectScheduler.schedule(
+            {
+                if (appInForeground && autoReconnectEnabled && !userDisconnected && !connected) {
+                    startConnection(host, automatic = true)
+                }
+            },
+            delays[attempt],
+            TimeUnit.MILLISECONDS
+        )
+    }
+
+    private fun cancelReconnect() {
+        reconnectTask?.cancel(false)
+        reconnectTask = null
+    }
+
     fun mouseButton(button: String, action: String) =
         send(JSONObject().put("type", "mouse_button").put("button", button).put("action", action))
 
@@ -143,6 +228,7 @@ class VibeSocket(context: Context) {
     fun dispose() {
         disconnect()
         movementScheduler.shutdownNow()
+        reconnectScheduler.shutdownNow()
         udpSocket.close()
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()

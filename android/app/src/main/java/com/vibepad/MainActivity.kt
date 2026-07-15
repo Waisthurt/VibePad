@@ -34,6 +34,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material.icons.Icons
@@ -87,7 +88,11 @@ class MainActivity : ComponentActivity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         connection = VibeSocket(applicationContext)
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStop(owner: LifecycleOwner) = releaseRemoteInput()
+            override fun onStart(owner: LifecycleOwner) = connection.onAppForeground()
+            override fun onStop(owner: LifecycleOwner) {
+                releaseRemoteInput()
+                connection.onAppBackground()
+            }
         })
         setContent { MaterialTheme(colorScheme = VibePadColors) { VibePadScreen(connection) } }
     }
@@ -200,6 +205,20 @@ private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
                 steps = 24
             )
             Text("仅影响触控板的双指滚动速度，不影响鼠标移动。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("自动重连", style = MaterialTheme.typography.titleMedium)
+                    Text("回到前台后自动连接上次成功的电脑", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = connection.autoReconnectEnabled,
+                    onCheckedChange = connection::updateAutoReconnect
+                )
+            }
         }
     }
 }

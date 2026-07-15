@@ -1,6 +1,6 @@
 #define AppName "VibePad Agent"
 #ifndef AppVersion
-#define AppVersion "0.1.3"
+#define AppVersion "0.1.4"
 #endif
 #define AppPublisher "VibePad"
 #define AppExeName "VibePad.Agent.exe"
