@@ -54,6 +54,7 @@ internal sealed class AgentRuntime : IDisposable
 
 internal sealed class VibePadTrayContext : ApplicationContext
 {
+    private static readonly System.Drawing.Icon AppIcon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
     private readonly AgentRuntime _runtime;
     private readonly EventWaitHandle _showWindowEvent;
     private readonly CancellationTokenSource _showWindowCancellation = new();
@@ -84,7 +85,7 @@ internal sealed class VibePadTrayContext : ApplicationContext
         menu.Items.Add("退出", null, (_, _) => ExitApplication());
         _trayIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = AppIcon,
             Text = "VibePad Agent",
             Visible = true,
             ContextMenuStrip = menu
@@ -159,6 +160,7 @@ internal sealed class VibePadTrayContext : ApplicationContext
 
 internal sealed class StatusForm : Form
 {
+    private static readonly System.Drawing.Icon AppIcon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
     private static readonly Color Background = Color.FromArgb(18, 16, 21);
     private static readonly Color Surface = Color.FromArgb(41, 37, 47);
     private static readonly Color Primary = Color.FromArgb(185, 154, 255);
@@ -177,7 +179,7 @@ internal sealed class StatusForm : Form
     public StatusForm(IReadOnlyList<LocalNetworkAddress> addresses, Action<bool> setStartup, Action exit)
     {
         Text = "VibePad Agent";
-        Icon = SystemIcons.Application;
+        Icon = AppIcon;
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
