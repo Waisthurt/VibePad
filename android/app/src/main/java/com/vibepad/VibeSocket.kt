@@ -64,11 +64,16 @@ class VibeSocket(context: Context) {
         private set
     var autoReconnectEnabled by mutableStateOf(preferences.getBoolean("auto_reconnect", true))
         private set
+    var selectionAvailable by mutableStateOf(false)
+        private set
+    var extractedSelection by mutableStateOf<String?>(null)
+        private set
 
     init {
         // Mouse events can arrive in bursts. Flush the combined relative movement at a
         // stable cadence so Wi-Fi packet timing does not become visible cursor jitter.
         movementScheduler.scheduleAtFixedRate(::flushRemoteInput, 8, 8, TimeUnit.MILLISECONDS)
+        movementScheduler.scheduleAtFixedRate(::requestSelectionStatus, 500, 700, TimeUnit.MILLISECONDS)
     }
 
     fun connect(host: String) {
@@ -111,6 +116,7 @@ class VibeSocket(context: Context) {
         connected = false
         udpReady = false
         udpScrollReady = false
+        updateSelectionAvailable(false)
         udpDestination = runCatching { InetAddress.getByName(host) }.getOrNull()
         update(ConnectionState.CONNECTING, if (automatic) "正在自动重连 $host" else "正在连接 $host")
         socket = client.newWebSocket(
@@ -153,6 +159,7 @@ class VibeSocket(context: Context) {
         connected = false
         udpReady = false
         udpScrollReady = false
+        updateSelectionAvailable(false)
         socket?.close(1000, "user disconnected")
         socket = null
         if (state != ConnectionState.DISCONNECTED) update(ConnectionState.DISCONNECTED, "未连接")
@@ -225,6 +232,12 @@ class VibeSocket(context: Context) {
 
     fun clipboard(action: String) = send(JSONObject().put("type", "clipboard").put("action", action))
 
+    fun smartSelection() = send(JSONObject().put("type", "smart_selection"))
+
+    fun consumeExtractedSelection() {
+        extractedSelection = null
+    }
+
     fun dispose() {
         disconnect()
         movementScheduler.shutdownNow()
@@ -289,6 +302,10 @@ class VibeSocket(context: Context) {
         pendingScroll = 0f
     }
 
+    private fun requestSelectionStatus() {
+        if (connected) socket?.send(JSONObject().put("type", "selection_status").toString())
+    }
+
     private fun handleMessage(text: String) {
         val json = runCatching { JSONObject(text) }.getOrNull() ?: return
         when (json.optString("type")) {
@@ -297,10 +314,21 @@ class VibeSocket(context: Context) {
                 udpReady = true
                 udpScrollReady = json.optBoolean("scroll", false)
             }
+            "selection_state" -> updateSelectionAvailable(json.optBoolean("hasSelection", false))
+            "selection_result" -> main.post {
+                selectionAvailable = false
+                extractedSelection = json.optString("text")
+                statusMessage = "已提取到手机"
+            }
+            "selection_action" -> {
+                updateSelectionAvailable(false)
+                update(ConnectionState.CONNECTED, "已全选电脑内容")
+            }
             "error" -> update(ConnectionState.CONNECTED, "错误：${json.optString("message")}")
         }
     }
 
+    private fun updateSelectionAvailable(value: Boolean) = main.post { selectionAvailable = value }
     private fun update(nextState: ConnectionState, text: String) = main.post { state = nextState; statusMessage = text }
     private fun showFailure(text: String) = update(ConnectionState.FAILED, text)
 }

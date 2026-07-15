@@ -43,6 +43,15 @@ Permitted keys in v0: `ENTER`, `BACKSPACE`, `SCREENSHOT`. `press` means an atomi
 
 These commands inject Ctrl+C and Ctrl+V respectively into the currently focused Windows application.
 
+### Smart selection
+
+```json
+{"type":"selection_status"}
+{"type":"smart_selection"}
+```
+
+The Android client periodically requests `selection_status`. When the focused Windows control exposes a non-empty text selection through Windows UI Automation, the client shows **提取** and `smart_selection` returns that text as `selection_result`, which is appended to the phone's input field. Otherwise it shows **全选** and `smart_selection` injects Ctrl+A.
+
 ## High-frequency mouse movement and scrolling
 
 After the WebSocket connection is accepted, a current Agent returns `{"type":"udp_ready","port":8767,"scroll":true}`. Android then sends accumulated high-frequency input to UDP port `8767`.
@@ -67,6 +76,9 @@ Android keeps emitting WebSocket fallbacks. The Agent ignores a fallback only af
 ```json
 {"type":"paste_result","requestId":"uuid","success":true,"message":"pasted"}
 {"type":"pong","timestamp":1783900000000}
+{"type":"selection_state","hasSelection":true}
+{"type":"selection_result","text":"Selected text"}
+{"type":"selection_action","action":"select_all"}
 {"type":"error","message":"Human-readable error"}
 ```
 

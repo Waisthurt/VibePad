@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.text.KeyboardOptions
@@ -37,6 +39,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.runtime.Composable
@@ -51,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
@@ -117,6 +121,12 @@ private fun VibePadScreen(connection: VibeSocket) {
     var showSettings by remember { mutableStateOf(false) }
     val view = LocalView.current
 
+    LaunchedEffect(connection.extractedSelection) {
+        val extracted = connection.extractedSelection ?: return@LaunchedEffect
+        text = if (text.isBlank()) extracted else "$text\n$extracted"
+        connection.consumeExtractedSelection()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -163,13 +173,15 @@ private fun VibePadScreen(connection: VibeSocket) {
             onValueChange = { text = it },
             label = { Text("输入文字或使用系统语音输入") },
             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-            modifier = Modifier.fillMaxWidth().height(136.dp),
+            // 六个快捷键改为横向胶囊后，把省下的空间优先还给输入框。
+            modifier = Modifier.fillMaxWidth().height(142.dp),
             minLines = 3,
             maxLines = 5
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             ActionButton("复制", Modifier.weight(1f)) { connection.clipboard("copy"); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
             ActionButton("粘贴", Modifier.weight(1f)) { connection.clipboard("paste"); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
+            ActionButton(if (connection.selectionAvailable) "提取" else "全选", Modifier.weight(1f)) { connection.smartSelection(); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
             ActionButton("上传", Modifier.weight(1f)) { connection.paste(text); if (connection.state == ConnectionState.CONNECTED) text = "" }
             ActionButton("回车", Modifier.weight(1f)) { connection.key("ENTER", "press"); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
             HoldBackspace(connection, Modifier.weight(1f))
@@ -184,8 +196,21 @@ private fun VibePadScreen(connection: VibeSocket) {
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
-        Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp).padding(bottom = 28.dp)) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val uriHandler = LocalUriHandler.current
+    // 设置内容需要完整显示；跳过默认的半展开停靠点，打开即到最高位置。
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        sheetState = sheetState
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 24.dp, vertical = 8.dp)
+                // 设置弹层同样需要避开三键/手势导航栏，不能让最后一项被系统栏盖住。
+                .navigationBarsPadding()
+                .padding(bottom = 28.dp)
+        ) {
             Text("控制设置", style = MaterialTheme.typography.titleLarge)
             Text("鼠标灵敏度", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp))
             Text("${String.format("%.1f", connection.mouseSensitivity)}×", color = MaterialTheme.colorScheme.primary)
@@ -195,7 +220,6 @@ private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
                 valueRange = 0.5f..3f,
                 steps = 24
             )
-            Text("仅影响触控板的移动速度，不影响点击、拖拽或滚轮。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("滚动灵敏度", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp))
             Text("${String.format("%.1f", connection.scrollSensitivity)}×", color = MaterialTheme.colorScheme.primary)
             Slider(
@@ -204,7 +228,6 @@ private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
                 valueRange = 0.5f..3f,
                 steps = 24
             )
-            Text("仅影响触控板的双指滚动速度，不影响鼠标移动。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 24.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -219,6 +242,21 @@ private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
                     onCheckedChange = connection::updateAutoReconnect
                 )
             }
+            Text("关于", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp))
+            Text(
+                "版本 0.1.4",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+            Text(
+                "最新版地址：github.com/Waisthurt/VibePad",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .clickable { uriHandler.openUri("https://github.com/Waisthurt/VibePad") }
+            )
         }
     }
 }
@@ -227,7 +265,9 @@ private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
 private fun ActionButton(label: String, modifier: Modifier, onClick: () -> Unit) {
     Button(
         onClick = onClick,
-        modifier = modifier.height(52.dp),
+        // 保持六等分宽度和文字居中；较矮的高度让按钮成为横向胶囊，
+        // 同时为输入栏与触控板释放垂直空间。
+        modifier = modifier.height(42.dp),
         colors = ButtonDefaults.buttonColors(),
         contentPadding = PaddingValues(horizontal = 4.dp)
     ) {
@@ -333,5 +373,8 @@ private fun HoldBackspace(connection: VibeSocket, modifier: Modifier) {
             }
         } else connection.key("BACKSPACE", "up")
     }
-    Button(onClick = { }, interactionSource = interaction, modifier = modifier.height(52.dp)) { Text("⌫") }
+    Button(onClick = { }, interactionSource = interaction, modifier = modifier.height(42.dp)) {
+        // 这个字形右侧较宽，做视觉居中校正，不影响按钮的实际点击区域。
+        Text("⌫", modifier = Modifier.offset(x = (-4).dp))
+    }
 }

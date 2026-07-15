@@ -7,6 +7,7 @@ using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Automation;
 using System.Windows.Forms;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -73,6 +74,8 @@ internal static class Program
 
 internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInjector input, MouseMotionBuffer mouseMotion, UdpMouseReceiver udpMouse, Action<string> reportStatus)
 {
+    private readonly TextSelectionReader _selectionReader = new();
+
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         var builder = WebApplication.CreateBuilder();
@@ -164,6 +167,21 @@ internal sealed class AgentServer(int port, ClipboardWorker clipboard, InputInje
                     break;
                 case "clipboard":
                     HandleClipboard(root);
+                    break;
+                case "selection_status":
+                    await SendAsync(socket, new { type = "selection_state", hasSelection = _selectionReader.HasSelection() }, token);
+                    break;
+                case "smart_selection":
+                    var selectedText = _selectionReader.GetSelectedText();
+                    if (selectedText is { Length: > 0 })
+                    {
+                        await SendAsync(socket, new { type = "selection_result", text = selectedText }, token);
+                    }
+                    else
+                    {
+                        input.TapCtrlA();
+                        await SendAsync(socket, new { type = "selection_action", action = "select_all" }, token);
+                    }
                     break;
                 case "mouse_scroll":
                     if (!udpMouse.IsScrollActiveFor(remoteAddress))
@@ -269,6 +287,28 @@ internal sealed class ClipboardWorker : IDisposable
     public void Dispose() { _jobs.CompleteAdding(); _thread.Join(TimeSpan.FromSeconds(2)); _jobs.Dispose(); }
 }
 
+internal sealed class TextSelectionReader
+{
+    public bool HasSelection() => GetSelectedText() is { Length: > 0 };
+
+    public string? GetSelectedText()
+    {
+        try
+        {
+            var focused = AutomationElement.FocusedElement;
+            if (focused is null || !focused.TryGetCurrentPattern(TextPattern.Pattern, out var pattern) || pattern is not TextPattern textPattern)
+                return null;
+
+            var text = string.Concat(textPattern.GetSelection().Select(range => range.GetText(-1)));
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch (Exception e) when (e is ElementNotAvailableException or InvalidOperationException or COMException)
+        {
+            return null;
+        }
+    }
+}
+
 internal sealed class InputInjector
 {
     private readonly HashSet<int> _heldKeys = [];
@@ -278,6 +318,7 @@ internal sealed class InputInjector
     public void KeyDown(int key) { lock (_gate) if (_heldKeys.Add(key)) Send(key, false); }
     public void KeyUp(int key) { lock (_gate) if (_heldKeys.Remove(key)) Send(key, true); }
     public void TapCtrlC() { KeyDown(0x11); KeyDown(0x43); KeyUp(0x43); KeyUp(0x11); }
+    public void TapCtrlA() { KeyDown(0x11); KeyDown(0x41); KeyUp(0x41); KeyUp(0x11); }
     public void TapCtrlV() { KeyDown(0x11); KeyDown(0x56); KeyUp(0x56); KeyUp(0x11); }
     public void OpenScreenSnip()
     {
