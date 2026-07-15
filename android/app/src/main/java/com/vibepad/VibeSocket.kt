@@ -62,6 +62,8 @@ class VibeSocket(context: Context) {
         private set
     var scrollSensitivity by mutableFloatStateOf(preferences.getFloat("scroll_sensitivity", 1f))
         private set
+    var edgeMotionSpeed by mutableFloatStateOf(preferences.getFloat("edge_motion_speed", 1f))
+        private set
     var autoReconnectEnabled by mutableStateOf(preferences.getBoolean("auto_reconnect", true))
         private set
     var selectionAvailable by mutableStateOf(false)
@@ -188,6 +190,11 @@ class VibeSocket(context: Context) {
     fun updateScrollSensitivity(value: Float) {
         scrollSensitivity = value.coerceIn(0.5f, 3f)
         preferences.edit().putFloat("scroll_sensitivity", scrollSensitivity).apply()
+    }
+
+    fun updateEdgeMotionSpeed(value: Float) {
+        edgeMotionSpeed = value.coerceIn(0.5f, 3f)
+        preferences.edit().putFloat("edge_motion_speed", edgeMotionSpeed).apply()
     }
 
     private fun scheduleReconnect(host: String, reason: String) {

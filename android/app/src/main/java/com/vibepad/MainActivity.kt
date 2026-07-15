@@ -52,8 +52,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -67,6 +69,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 private val VibePadColors = darkColorScheme(
     primary = Color(0xFFB99AFF),
@@ -228,6 +231,19 @@ private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
                 valueRange = 0.5f..3f,
                 steps = 24
             )
+            Text("边缘移动速度", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp))
+            Text("${String.format("%.1f", connection.edgeMotionSpeed)}×", color = MaterialTheme.colorScheme.primary)
+            Slider(
+                value = connection.edgeMotionSpeed,
+                onValueChange = connection::updateEdgeMotionSpeed,
+                valueRange = 0.5f..3f,
+                steps = 24
+            )
+            Text(
+                "长按拖拽时，手指停在触控板边缘会持续移动鼠标",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 24.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -244,7 +260,7 @@ private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
             }
             Text("关于", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp))
             Text(
-                "版本 0.1.4",
+                "版本 0.1.5",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 6.dp)
@@ -279,11 +295,12 @@ private fun ActionButton(label: String, modifier: Modifier, onClick: () -> Unit)
 @OptIn(ExperimentalComposeUiApi::class)
 private fun Touchpad(connection: VibeSocket, modifier: Modifier) {
     val view = LocalView.current
+    val edgeThreshold = with(LocalDensity.current) { 28.dp.toPx() }
     Box(
         modifier = modifier
             .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.medium)
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
-            .pointerInput(connection) {
+            .pointerInput(connection, edgeThreshold) {
                 coroutineScope {
                     awaitEachGesture {
                         val first = awaitFirstDown(requireUnconsumed = false)
@@ -293,12 +310,50 @@ private fun Touchpad(connection: VibeSocket, modifier: Modifier) {
                         var multiTouch = false
                         var twoFingerMoved = false
                         var dragging = false
+                        var edgeDirection = Offset.Zero
+                        var edgeMotionJob: kotlinx.coroutines.Job? = null
+
+                        fun updateEdgeMotion(position: Offset) {
+                            if (!dragging) return
+                            val directionX = when {
+                                position.x <= edgeThreshold -> -1f
+                                position.x >= size.width - edgeThreshold -> 1f
+                                else -> 0f
+                            }
+                            val directionY = when {
+                                position.y <= edgeThreshold -> -1f
+                                position.y >= size.height - edgeThreshold -> 1f
+                                else -> 0f
+                            }
+                            edgeDirection = Offset(directionX, directionY)
+                            if (edgeDirection == Offset.Zero) {
+                                edgeMotionJob?.cancel()
+                                edgeMotionJob = null
+                            } else if (edgeMotionJob == null || edgeMotionJob?.isActive != true) {
+                                edgeMotionJob = launch {
+                                    // 以 125Hz 持续补充相对位移，和常规鼠标移动使用同一条
+                                    // 平滑传输链路。对角线先归一化，确保总速度保持不变。
+                                    val frameMillis = 8L
+                                    val baseSpeed = 720f
+                                    while (dragging && edgeDirection != Offset.Zero) {
+                                        val length = sqrt(edgeDirection.x * edgeDirection.x + edgeDirection.y * edgeDirection.y)
+                                        val distance = baseSpeed * connection.edgeMotionSpeed * frameMillis / 1000f
+                                        connection.moveMouse(
+                                            edgeDirection.x / length * distance,
+                                            edgeDirection.y / length * distance
+                                        )
+                                        delay(frameMillis)
+                                    }
+                                }
+                            }
+                        }
                         val dragStarter = launch {
                             delay(400)
                             if (!multiTouch && !moved) {
                                 dragging = true
                                 connection.mouseButton("left", "down")
                                 view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                                updateEdgeMotion(lastPosition)
                             }
                         }
                         var anyPressed: Boolean
@@ -307,7 +362,13 @@ private fun Touchpad(connection: VibeSocket, modifier: Modifier) {
                             val pressed = event.changes.filter { it.pressed }
                             if (pressed.size >= 2) {
                                 multiTouch = true
-                                if (dragging) { connection.mouseButton("left", "up"); dragging = false }
+                                if (dragging) {
+                                    edgeMotionJob?.cancel()
+                                    edgeMotionJob = null
+                                    edgeDirection = Offset.Zero
+                                    connection.mouseButton("left", "up")
+                                    dragging = false
+                                }
                                 val averageY = pressed.take(2).map { it.position.y }.average().toFloat()
                                 if (lastTwoFingerY != 0f) {
                                     val delta = ((averageY - lastTwoFingerY) * 4f).toInt()
@@ -329,12 +390,14 @@ private fun Touchpad(connection: VibeSocket, modifier: Modifier) {
                                         moved = true
                                         connection.moveMouse(dx, dy)
                                         lastPosition = position
+                                        updateEdgeMotion(position)
                                     }
                                 }
                             }
                             anyPressed = event.changes.any { it.pressed }
                         } while (anyPressed)
                         dragStarter.cancel()
+                        edgeMotionJob?.cancel()
                         when {
                             dragging -> connection.mouseButton("left", "up")
                             multiTouch && !twoFingerMoved -> { connection.mouseButton("right", "press"); view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
