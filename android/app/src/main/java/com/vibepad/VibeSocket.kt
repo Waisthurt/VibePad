@@ -40,7 +40,7 @@ class VibeSocket(context: Context) {
     @Volatile private var udpDestination: InetAddress? = null
     private var pendingDx = 0f
     private var pendingDy = 0f
-    private var pendingScroll = 0
+    private var pendingScroll = 0f
 
     var state by mutableStateOf(ConnectionState.DISCONNECTED)
         private set
@@ -49,6 +49,8 @@ class VibeSocket(context: Context) {
     var savedHost: String = preferences.getString("host", "") ?: ""
         private set
     var mouseSensitivity by mutableFloatStateOf(preferences.getFloat("mouse_sensitivity", 1.35f))
+        private set
+    var scrollSensitivity by mutableFloatStateOf(preferences.getFloat("scroll_sensitivity", 1f))
         private set
 
     init {
@@ -121,13 +123,18 @@ class VibeSocket(context: Context) {
         preferences.edit().putFloat("mouse_sensitivity", mouseSensitivity).apply()
     }
 
+    fun updateScrollSensitivity(value: Float) {
+        scrollSensitivity = value.coerceIn(0.5f, 3f)
+        preferences.edit().putFloat("scroll_sensitivity", scrollSensitivity).apply()
+    }
+
     fun mouseButton(button: String, action: String) =
         send(JSONObject().put("type", "mouse_button").put("button", button).put("action", action))
 
     fun scroll(delta: Int) {
         if (!connected || delta == 0) return
         synchronized(movementLock) {
-            pendingScroll = (pendingScroll + delta).coerceIn(-1200, 1200)
+            pendingScroll = (pendingScroll + delta * scrollSensitivity).coerceIn(-1200f, 1200f)
         }
     }
 
@@ -148,10 +155,11 @@ class VibeSocket(context: Context) {
     private fun flushRemoteInput() {
         if (!connected) return
         val input = synchronized(movementLock) {
-            val result = Triple(pendingDx, pendingDy, pendingScroll)
+            val scroll = pendingScroll.toInt()
+            val result = Triple(pendingDx, pendingDy, scroll)
             pendingDx = 0f
             pendingDy = 0f
-            pendingScroll = 0
+            pendingScroll -= scroll
             result
         }
         if (input.first != 0f || input.second != 0f) {
@@ -192,7 +200,7 @@ class VibeSocket(context: Context) {
     private fun clearPendingInput() = synchronized(movementLock) {
         pendingDx = 0f
         pendingDy = 0f
-        pendingScroll = 0
+        pendingScroll = 0f
     }
 
     private fun handleMessage(text: String) {

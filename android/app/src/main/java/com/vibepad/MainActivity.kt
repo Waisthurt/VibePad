@@ -191,6 +191,15 @@ private fun ControlSettings(connection: VibeSocket, onDismiss: () -> Unit) {
                 steps = 24
             )
             Text("仅影响触控板的移动速度，不影响点击、拖拽或滚轮。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("滚动灵敏度", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp))
+            Text("${String.format("%.1f", connection.scrollSensitivity)}×", color = MaterialTheme.colorScheme.primary)
+            Slider(
+                value = connection.scrollSensitivity,
+                onValueChange = connection::updateScrollSensitivity,
+                valueRange = 0.5f..3f,
+                steps = 24
+            )
+            Text("仅影响触控板的双指滚动速度，不影响鼠标移动。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

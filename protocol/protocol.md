@@ -43,11 +43,18 @@ Permitted keys in v0: `ENTER`, `BACKSPACE`, `SCREENSHOT`. `press` means an atomi
 
 These commands inject Ctrl+C and Ctrl+V respectively into the currently focused Windows application.
 
-## High-frequency mouse movement
+## High-frequency mouse movement and scrolling
 
-After the WebSocket connection is accepted, the Agent returns `{"type":"udp_ready","port":8767}`. Android then sends each accumulated movement as an 8-byte little-endian UDP datagram to port `8767`: `float32 dx`, followed by `float32 dy`.
+After the WebSocket connection is accepted, a current Agent returns `{"type":"udp_ready","port":8767,"scroll":true}`. Android then sends accumulated high-frequency input to UDP port `8767`.
 
-The Agent accepts UDP only from the connected phone's IP address. Android keeps emitting the WebSocket `mouse_move` fallback: the Agent ignores that fallback after its first valid UDP datagram, but continues to use it if UDP is blocked by a firewall.
+| Input | UDP datagram |
+| --- | --- |
+| Mouse movement | 8 bytes, little-endian `float32 dx` followed by `float32 dy` |
+| Two-finger scroll | 5 bytes, byte `0x01` followed by little-endian `int32 delta` |
+
+Android batches both movement and scrolling at a stable 8ms cadence. The Agent accepts UDP only from the connected phone's IP address.
+
+Android keeps emitting WebSocket fallbacks. The Agent ignores a fallback only after receiving the first valid UDP datagram of the corresponding kind, but continues to use WebSocket if UDP is blocked by a firewall. Older Agents omit `scroll:true`; Android then keeps scrolling over WebSocket only.
 
 ### Keepalive
 
